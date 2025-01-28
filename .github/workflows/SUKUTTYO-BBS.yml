@@ -113,12 +113,6 @@ jobs:
               main()
           EOL
 
-      - name: Create README if not exists
-        run: |
-          if [ ! -f README.md ]; then
-            echo "# SUKUTTYO@BBS チャットログ" > README.md
-          fi
-
       - name: Commit and Push README
         run: |
           git config user.name 'GitHub Actions'
