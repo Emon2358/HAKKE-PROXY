@@ -10,6 +10,11 @@ on:
         required: true
         default: 'https://example.com'
 
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
 jobs:
   deploy-proxy:
     runs-on: ubuntu-latest
@@ -17,15 +22,15 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
     
     - name: Generate Dynamic Nginx Configuration
       env:
         TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
       run: |
-        # Nginx設定ディレクトリ作成
         mkdir -p nginx/conf.d
         
-        # メインNginx設定
         cat > nginx/nginx.conf << EOL
         user  nginx;
         worker_processes  auto;
@@ -52,11 +57,9 @@ jobs:
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
             
-            # SSL/セキュリティ設定
             proxy_ssl_server_name on;
             proxy_ssl_protocols TLSv1.2 TLSv1.3;
             
-            # タイムアウト設定
             proxy_connect_timeout 60s;
             proxy_send_timeout 60s;
             proxy_read_timeout 60s;
@@ -68,7 +71,6 @@ jobs:
         }
         EOL
         
-        # 動的プロキシ設定
         cat > nginx/conf.d/dynamic_proxy.conf << EOL
         server {
             listen 80;
@@ -78,26 +80,21 @@ jobs:
                 proxy_pass ${TARGET_URL};
                 proxy_intercept_errors on;
                 
-                # クロスオリジンリソース共有（CORS）の設定
                 add_header 'Access-Control-Allow-Origin' '*';
                 add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
                 add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
                 
-                # キャッシュ制御
                 proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
                 proxy_cache_lock on;
                 
-                # エラーページの設定
                 error_page 404 = @fallback;
                 error_page 500 502 503 504 = @fallback;
             }
             
-            # フォールバックロケーション
             location @fallback {
                 return 302 ${TARGET_URL};
             }
             
-            # セキュリティヘッダー
             add_header X-Frame-Options SAMEORIGIN;
             add_header X-XSS-Protection "1; mode=block";
             add_header X-Content-Type-Options nosniff;
@@ -111,70 +108,68 @@ jobs:
         cat > Dockerfile << EOL
         FROM nginx:latest
         
-        # システム更新とセキュリティ強化
         RUN apt-get update && \
             apt-get upgrade -y && \
             apt-get install -y curl ca-certificates && \
             rm -rf /var/lib/apt/lists/*
         
-        # カスタム設定をコピー
         COPY nginx/nginx.conf /etc/nginx/nginx.conf
         COPY nginx/conf.d/dynamic_proxy.conf /etc/nginx/conf.d/dynamic_proxy.conf
         
-        # デバッグ用のインデックスページ
         RUN echo "<!DOCTYPE html>" > /usr/share/nginx/html/index.html && \
             echo "<html><body>" >> /usr/share/nginx/html/index.html && \
             echo "<h1>Dynamic Proxy Server</h1>" >> /usr/share/nginx/html/index.html && \
             echo "<p>Proxying to: ${TARGET_URL}</p>" >> /usr/share/nginx/html/index.html && \
             echo "</body></html>" >> /usr/share/nginx/html/index.html
         
-        # Nginx設定の権限を修正
         RUN chmod 644 /etc/nginx/nginx.conf /etc/nginx/conf.d/dynamic_proxy.conf
         
-        # ユーザーを変更してセキュリティを強化
         RUN chown -R nginx:nginx /etc/nginx /var/cache/nginx /var/log/nginx
         
         EXPOSE 80
         
-        # エントリーポイントスクリプトを追加
         COPY entrypoint.sh /entrypoint.sh
         RUN chmod +x /entrypoint.sh
         
         ENTRYPOINT ["/entrypoint.sh"]
         EOL
         
-        # エントリーポイントスクリプトを作成
         cat > entrypoint.sh << EOL
         #!/bin/bash
         set -e
         
-        # Nginx設定の最終チェック
         nginx -t
         
-        # Nginxをフォアグラウンドで起動
         exec nginx -g "daemon off;"
         EOL
     
     - name: Build and Test Nginx Proxy
       run: |
-        # Dockerイメージをビルド
         docker build -t dynamic-nginx-proxy .
         
-        # コンテナを起動
         docker run -d -p 8080:80 --name proxy-container dynamic-nginx-proxy
         
-        # コンテナログを表示
         docker logs proxy-container
         
-        # プロキシの動作を確認
         curl http://localhost:8080
     
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
+    - name: Setup Pages
+      uses: actions/configure-pages@v3
+    
+    - name: Build with Jekyll
+      uses: actions/jekyll-build-pages@v1
       with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: .
-        publish_branch: gh-pages
+        source: ./
+        destination: ./_site
+    
+    - name: Upload artifact
+      uses: actions/upload-pages-artifact@v2
+      with:
+        path: ./_site
+    
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v2
     
     - name: Generate README with Proxy Info
       env:
@@ -201,6 +196,9 @@ jobs:
       run: |
         git config --global user.name 'GitHub Actions'
         git config --global user.email 'actions@github.com'
+        
         git add README.md
         git commit -m "Update README with proxy info" || echo "No changes to commit"
-        git push ```yaml```
+        
+        # Use GitHub token for authentication
+        git push origin main
