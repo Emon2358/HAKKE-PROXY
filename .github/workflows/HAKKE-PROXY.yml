@@ -1,4 +1,4 @@
-name: Dynamic Nginx Proxy Deployment
+name: HAKKAE PROXY
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
 
 # デフォルトの権限を設定
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -24,14 +24,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
       
+      - name: Prepare Pages Directory
+        run: |
+          mkdir -p _site
+          
+          # Create a basic Jekyll configuration to ensure GitHub Pages builds
+          cat > _site/_config.yml << EOL
+          title: Dynamic Nginx Proxy
+          description: A dynamic proxy server deployed via GitHub Actions
+          theme: jekyll-theme-minimal
+          EOL
+      
       - name: Generate Dynamic Nginx Configuration
         env:
           TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
         run: |
-          mkdir -p nginx/conf.d
+          mkdir -p _site/nginx/conf.d
           
           # メインNginx設定
-          cat > nginx/nginx.conf << EOL
+          cat > _site/nginx/nginx.conf << EOL
           user  nginx;
           worker_processes  auto;
           
@@ -72,7 +83,7 @@ jobs:
           EOL
           
           # 動的プロキシ設定
-          cat > nginx/conf.d/dynamic_proxy.conf << EOL
+          cat > _site/nginx/conf.d/dynamic_proxy.conf << EOL
           server {
               listen 80;
               server_name localhost;
@@ -106,7 +117,7 @@ jobs:
         env:
           TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
         run: |
-          cat > Dockerfile << EOL
+          cat > _site/Dockerfile << EOL
           FROM nginx:latest
           
           RUN apt-get update && \
@@ -135,7 +146,7 @@ jobs:
           ENTRYPOINT ["/entrypoint.sh"]
           EOL
           
-          cat > entrypoint.sh << EOL
+          cat > _site/entrypoint.sh << EOL
           #!/bin/bash
           set -e
           
@@ -144,19 +155,10 @@ jobs:
           exec nginx -g "daemon off;"
           EOL
       
-      - name: Build and Test Nginx Proxy
+      - name: Create index.html
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
         run: |
-          docker build -t dynamic-nginx-proxy .
-          docker run -d -p 8080:80 --name proxy-container dynamic-nginx-proxy
-          docker logs proxy-container
-          curl http://localhost:8080
-      
-      - name: Prepare Pages
-        run: |
-          # GitHub Pagesに必要な静的ファイルを準備
-          mkdir -p _site
-          
-          # index.htmlを作成
           cat > _site/index.html << EOL
           <!DOCTYPE html>
           <html>
@@ -165,14 +167,11 @@ jobs:
           </head>
           <body>
               <h1>Dynamic Nginx Proxy</h1>
-              <p>Proxy Target: ${{ github.event.inputs.target_url || 'https://example.com' }}</p>
+              <p>Proxy Target: ${TARGET_URL}</p>
+              <a href="${TARGET_URL}">Go to Proxy Target</a>
           </body>
           </html>
           EOL
-          
-          # 追加のファイルをコピー
-          cp -r nginx _site/
-          cp Dockerfile _site/
       
       - name: Generate README
         env:
@@ -214,8 +213,8 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v2
-  
-  # README更新ジョブ ```yaml
+
+  # リポジトリ更新ジョブ ```yaml
   update-readme:
     needs: [build, deploy]
     runs-on: ubuntu-latest
@@ -232,4 +231,4 @@ jobs:
           git commit -m "Update README with proxy info" || echo "No changes to commit"
           
           # Use GitHub token for authentication
-          git push origin main ``` yaml ```
+          git push origin main
