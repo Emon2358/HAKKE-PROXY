@@ -1,15 +1,16 @@
-name: HAKKE PROXY
+name: Continuous IP Rotation Proxy
 
 on:
   workflow_dispatch:
     inputs:
-      target_url:
-        description: 'Target URL to proxy'
-        required: true
-        default: 'https://example.com'
+      stop:
+        description: 'Stop the workflow'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
-  dynamic-proxy-setup:
+  continuous-ip-rotation:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -20,205 +21,134 @@ jobs:
         with:
           python-version: '3.9'
       
-      - name: Prepare Nginx Configuration
-        env:
-          TARGET_URL: ${{ github.event.inputs.target_url }}
-        run: |
-          # Nginx設定ディレクトリ作成
-          mkdir -p nginx/conf.d
-          
-          # Nginx主設定
-          cat > nginx/nginx.conf << 'EOL'
-          user  nginx;
-          worker_processes  auto;
-          
-          error_log  /tmp/nginx-error.log warn;
-          pid        /tmp/nginx.pid;
-          
-          events {
-              worker_connections  1024;
-          }
-          
-          http {
-              include       /etc/nginx/mime.types;
-              default_type  application/octet-stream;
-              
-              log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
-                                '$status $body_bytes_sent "$http_referer" '
-                                '"$http_user_agent" "$http_x_forwarded_for"';
-              
-              access_log  /tmp/nginx-access.log  main;
-              
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              
-              sendfile        on;
-              keepalive_timeout  65;
-              
-              server {
-                  listen 8080;
-                  server_name localhost;
-                  
-                  location / {
-                      proxy_pass $TARGET_URL;
-                      proxy_set_header Host $host;
-                      proxy_set_header X-Real-IP $remote_addr;
-                      
-                      # CORS設定
-                      add_header 'Access-Control-Allow-Origin' '*';
-                      add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
-                      
-                      # エラーハンドリング
-                      proxy_intercept_errors on;
-                      error_page 404 = @fallback;
-                  }
-                  
-                  location @fallback {
-                      return 302 $TARGET_URL;
-                  }
-              }
-          }
-          EOL
-      
-      - name: Create Proxy Monitoring Script
-        env:
-          TARGET_URL: ${{ github.event.inputs.target_url }}
-        run: |
-          cat > proxy_monitor.py << 'EOL'
-          import subprocess
-          import sys
-          import time
-          import requests
-          import logging
-          import os
-          
-          logging.basicConfig(level=logging.INFO, 
-                             format='%(asctime)s - %(levelname)s - %(message)s')
-          logger = logging.getLogger(__name__)
-          
-          def start_nginx():
-              """Nginxプロセスを起動"""
-              try:
-                  # Nginx設定ファイルの検証
-                  subprocess.run(['nginx', '-t'], check=True)
-                  
-                  # Nginxを起動
-                  nginx_process = subprocess.Popen(['nginx'], 
-                                                   stdout=subprocess.PIPE, 
-                                                   stderr=subprocess.PIPE)
-                  return nginx_process
-              except subprocess.CalledProcessError as e:
-                  logger.error(f"Nginx設定エラー: {e}")
-                  sys.exit(1)
-              except Exception as e:
-                  logger.error(f"Nginx起動エラー: {e}")
-                  sys.exit(1)
-          
-          def check_proxy_status(target_url):
-              """プロキシの動作確認"""
-              try:
-                  # プロキシ経由でターゲットにアクセス
-                  response = requests.get(
-                      'http://localhost:8080', 
-                      timeout=10
-                  )
-                  logger.info(f"Proxy Status: {response.status_code}")
-                  
-                  # レスポンスの基本的な検証
-                  if response.status_code == 200:
-                      logger.info("プロキシは正常に動作しています")
-                      return True
-                  else:
-                      logger.warning(f"プロキシのレスポンスが異常です: {response.status_code}")
-                      return False
-              
-              except requests.RequestException as e:
-                  logger.error(f"プロキシアクセスエラー: {e}")
-                  return False
-          
-          def main():
-              target_url = os.environ.get('TARGET_URL', 'https://example.com')
-              
-              # Nginx起動
-              nginx_process = start_nginx()
-              
-              # プロキシ動作確認
-              max_attempts = 5
-              for attempt in range(max_attempts):
-                  if check_proxy_status(target_url):
-                      break
-                  
-                  logger.warning(f"プロキシ確認失敗. 再試行 {attempt + 1}/{max_attempts}")
-                  time.sleep(2)
-              
-              # プロセスの状態を維持
-              try:
-                  nginx_process.wait()
-              except KeyboardInterrupt:
-                  logger.info("プロセス終了")
-                  nginx_process.terminate()
-          
-          if __name__ == "__main__":
-              main()
-          EOL
-      
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests stem
       
-      - name: Run Proxy Monitor
-        env:
-          TARGET_URL: ${{ github.event.inputs.target_url }}
+      - name: Create Continuous IP Rotation Script
         run: |
-          # 一時的なログディレクトリ作成
-          mkdir -p /tmp/nginx-logs
+          cat > continuous_ip_proxy.py << EOL
+          import requests
+          import subprocess
+          import time
+          import logging
+          import random
+          import stem.control
+          import os
           
-          # プロキシモニタースクリプト実行
-          python proxy_monitor.py &
-          
-          # バックグラウンドプロセスの生存を確認
-          sleep 30
-      
-      - name: Generate Proxy Report
-        env:
-          TARGET_URL: ${{ github.event.inputs.target_url }}
-        run: |
-          # プロキシ情報レポート生成
-          cat > PROXY_REPORT.md << EOL
-          # Dynamic Proxy Report
-          
-          ## Configuration
-          - **Target URL**: ${TARGET_URL}
-          - **Proxy Endpoint**: http://localhost:8080
-          
-          ## Monitoring Results
-          - Timestamp: $(date)
-          - Status: Operational
-          
-          ### Nginx Logs
-          \`\`\`
-          $(cat /tmp/nginx-error.log || echo "No error logs")
-          \`\`\`
-          
-          ### How to Use
-          1. Access the proxied site via the GitHub Actions environment
-          2. Use the proxy endpoint for further testing
+          # ロギング設定
+          logging.basicConfig(
+              level=logging.INFO, 
+              format='%(asctime)s - %(levelname)s - %(message)s',
+              filename='ip_rotation.log'
+          )
+          logger = logging.getLogger(__name__)
+
+          def start_tor():
+              """Torサービスを起動"""
+              try:
+                  subprocess.run(['sudo', 'service', 'tor', 'start'], check=True)
+                  time.sleep(10)  # Torの起動を待つ
+                  logger.info("Torサービスを起動しました")
+              except Exception as e:
+                  logger.error(f"Tor起動エラー: {e}")
+                  raise
+
+          def change_tor_identity():
+              """Torの接続を新しいIPに変更"""
+              try:
+                  with stem.control.Controller.from_port(port=9051) as controller:
+                      controller.authenticate()
+                      controller.signal(stem.Signal.NEWNYM)
+                  logger.info("新しいTorアイデンティティを取得")
+                  time.sleep(5)
+              except Exception as e:
+                  logger.error(f"IP変更エラー: {e}")
+
+          def get_current_ip():
+              """現在のパブリックIPを取得"""
+              try:
+                  # Tor経由でIPを取得
+                  proxies = {
+                      'http': 'socks5h://localhost:9050',
+                      'https': 'socks5h://localhost:9050'
+                  }
+                  response = requests.get(
+                      'https://api.ipify.org', 
+                      proxies=proxies, 
+                      timeout=10
+                  )
+                  return response.text
+              except Exception as e:
+                  logger.error(f"IP取得エラー: {e}")
+                  return "IP取得失敗"
+
+          def main():
+              # Torサービスの起動
+              start_tor()
+              
+              # 継続的な実行
+              iteration = 0
+              while True:
+                  try:
+                      iteration += 1
+                      logger.info(f"--- イテレーション {iteration} ---")
+                      
+                      # 現在のIPを表示
+                      current_ip = get_current_ip()
+                      logger.info(f"現在のIP: {current_ip}")
+                      
+                      # IPを変更
+                      change_tor_identity()
+                      
+                      # ランダムな待機
+                      wait_time = random.randint(30, 120)
+                      logger.info(f"{wait_time}秒待機...")
+                      time.sleep(wait_time)
+                  
+                  except KeyboardInterrupt:
+                      logger.info("プロセスを終了します")
+                      break
+                  except Exception as e:
+                      logger.error(f"予期しないエラー: {e}")
+                      time.sleep(10)  # エラー発生時は少し待機
+
+          if __name__ == "__main__":
+              main()
           EOL
-      
-      - name: Upload Proxy Report
-        uses: actions/upload-artifact@v3
-        with:
-          name: proxy-report
-          path: PROXY_REPORT.md
-      
-      - name: Show Nginx Logs
-        if: always()
+
+      - name: Prepare Tor
         run: |
-          echo "=== Nginx Error Log ==="
-          cat /tmp/nginx-error.log || true
+          # 必要なパッケージをインストール
+          sudo apt-get update
+          sudo apt-get install -y tor
+
+          # Torの設定を変更して匿名性を高める
+          sudo tee /etc/tor/torrc << EOF
+          SocksPort 9050
+          ControlPort 9051
+          CookieAuthentication 1
+          ExitNodes {us}
+          StrictNodes 1
+          NewCircuitPeriod 120
+          MaxCircuitDirtiness 120
+          EOF
           
-          echo "=== Nginx Access Log ==="
-          cat /tmp/nginx-access.log || true
+          # Torサービスを再起動
+          sudo systemctl restart tor
+
+      - name: Run Continuous IP Rotation
+        run: |
+          # Pythonスクリプトを実行
+          python continuous_ip_proxy.py &
+          
+          # 長時間実行を可能にする
+          sleep infinity
+
+      - name: Check Stop Condition
+        if: github.event.inputs.stop == 'true'
+        run: |
+          echo "ワークフローを停止します"
+          pkill -f continuous_ip_proxy.py
+          exit 0
