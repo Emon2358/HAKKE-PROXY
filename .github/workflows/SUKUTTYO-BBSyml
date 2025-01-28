@@ -1,0 +1,152 @@
+name: 救っちょ@BBS Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'ユーザー名 (ゲストの場合は「O」)'
+        required: true
+        default: 'O'
+      message:
+        description: 'メッセージ (オプション)'
+        required: false
+
+jobs:
+  救っちょ_bbs_chat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Setup Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.9'
+      
+      - name: Create 救っちょ@BBS Chat Script
+        env:
+          USERNAME: ${{ github.event.inputs.username }}
+          INITIAL_MESSAGE: ${{ github.event.inputs.message }}
+        run: |
+          cat > 救っちょ_bbs_chat.py << EOL
+          import os
+          import time
+          import threading
+          import uuid
+          import json
+
+          class 救っちょBBS:
+              def __init__(self, username):
+                  self.username = username if username else 'O'
+                  self.session_id = str(uuid.uuid4())
+                  self.messages_file = '救っちょ_bbs_messages.json'
+                  self.running = True
+
+              def send_message(self, message):
+                  """メッセージを送信"""
+                  try:
+                      # メッセージをJSONファイルに追記
+                      with open(self.messages_file, 'a+', encoding='utf-8') as f:
+                          f.write(json.dumps({
+                              'username': self.username,
+                              'message': message,
+                              'timestamp': int(time.time()),
+                              'session_id': self.session_id
+                          }) + '\n')
+                      print(f"{self.username}> {message}")
+                  except Exception as e:
+                      print(f"メッセージ送信エラー: {e}")
+
+              def read_messages(self):
+                  """新しいメッセージを読む"""
+                  try:
+                      with open(self.messages_file, 'r', encoding='utf-8') as f:
+                          lines = f.readlines()
+                          
+                      # 最後の10メッセージを表示
+                      recent_messages = lines[-10:]
+                      for line in recent_messages:
+                          try:
+                              msg = json.loads(line)
+                              if msg['username'] != self.username:
+                                  print(f"{msg['username']}> {msg['message']}")
+                          except json.JSONDecodeError:
+                              continue
+                  except FileNotFoundError:
+                      pass
+                  except Exception as e:
+                      print(f"メッセージ読み取りエラー: {e}")
+
+              def input_messages(self):
+                  """ユーザー入力処理"""
+                  print(f"救っちょ@BBS - {self.username}としてログイン")
+                  print("メッセージを入力 (exitで終了)")
+                  
+                  while self.running:
+                      try:
+                          message = input(f"{self.username}> ")
+                          if message.lower() in ['exit', 'quit']:
+                              self.send_message("セッションを終了します")
+                              self.running = False
+                              break
+                          
+                          if message:
+                              self.send_message(message)
+                              self.read_messages()
+                      
+                      except EOFError:
+                          # GitHub Actionsでの入力制限に対応
+                          self.running = False
+                          break
+                      except Exception as e:
+                          print(f"入力エラー: {e}")
+
+              def start_chat(self, initial_message=None):
+                  """チャットセッションの開始"""
+                  # 開始メッセージ
+                  self.send_message("救っちょ@BBSセッションを開始します")
+                  
+                  # 初期メッセージがある場合は送信
+                  if initial_message:
+                      self.send_message(initial_message)
+
+                  # 6時間の制限
+                  start_time = time.time()
+                  max_duration = 6 * 60 * 60  # 6時間
+
+                  # 入力スレッド
+                  input_thread = threading.Thread(target=self.input_messages)
+                  input_thread.start()
+
+                  # タイムアウト管理
+                  while time.time() - start_time < max_duration and self.running:
+                      time.sleep(60)  # 1分ごとにチェック
+
+                  # 終了処理
+                  self.send_message("救っちょ@BBSセッションを終了します")
+                  self.running = False
+
+          def main():
+              username = os.environ.get('USERNAME', 'O')
+              initial_message = os.environ.get('INITIAL_MESSAGE', None)
+              
+              bbs = 救っちょBBS(username)
+              bbs.start_chat(initial_message)
+
+          if __name__ == "__main__":
+              main()
+          EOL
+
+      - name: Run 救っちょ@BBS
+        env:
+          USERNAME: ${{ github.event.inputs.username }}
+          INITIAL_MESSAGE: ${{ github.event.inputs.message }}
+        run: |
+          python 救っちょ_bbs_chat.py
+
+      - name: Upload Chat Log
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: 救っちょ_bbs_log
+          path: 救っちょ_bbs_messages.json
