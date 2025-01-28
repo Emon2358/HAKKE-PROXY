@@ -34,62 +34,35 @@ jobs:
           import time
           import threading
           import uuid
-          import json
 
           class 救っちょBBS:
               def __init__(self, username):
                   self.username = username if username else 'O'
                   self.session_id = str(uuid.uuid4())
-                  self.messages_file = '救っちょ_bbs_messages.txt'
+                  self.readme_file = 'README.md'
                   self.running = True
 
               def send_message(self, message):
-                  """メッセージを送信"""
+                  """メッセージをREADMEに送信"""
                   try:
-                      # メッセージをファイルに追記
-                      log_message = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {self.username}> {message}"
-                      with open(self.messages_file, 'a', encoding='utf-8') as f:
-                          f.write(log_message + '\n')
+                      # READMEの現在の内容を読み込み
+                      try:
+                          with open(self.readme_file, 'r', encoding='utf-8') as f:
+                              existing_content = f.read()
+                      except FileNotFoundError:
+                          existing_content = "# 救っちょ@BBS チャットログ\n\n"
+
+                      # 新しいメッセージを追加
+                      log_message = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {self.username}> {message}\n\n"
+                      
+                      # READMEを更新
+                      with open(self.readme_file, 'w', encoding='utf-8') as f:
+                          f.write(existing_content + log_message)
                       
                       # 標準出力に直接表示
-                      print(log_message, flush=True)
+                      print(log_message.strip(), flush=True)
                   except Exception as e:
                       print(f"メッセージ送信エラー: {e}", flush=True)
-
-              def read_recent_messages(self):
-                  """最近のメッセージを読む"""
-                  try:
-                      with open(self.messages_file, 'r', encoding='utf-8') as f:
-                          lines = f.readlines()
-                      
-                      # 最後の10メッセージを表示
-                      recent_messages = lines[-10:]
-                      for line in recent_messages:
-                          print(line.strip(), flush=True)
-                  except FileNotFoundError:
-                      pass
-                  except Exception as e:
-                      print(f"メッセージ読み取りエラー: {e}", flush=True)
-
-              def continuous_message_reader(self):
-                  """継続的にメッセージを監視して表示"""
-                  last_size = 0
-                  while self.running:
-                      try:
-                          with open(self.messages_file, 'r', encoding='utf-8') as f:
-                              f.seek(last_size)
-                              new_messages = f.readlines()
-                              
-                              for msg in new_messages:
-                                  print(msg.strip(), flush=True)
-                              
-                              last_size = f.tell()
-                      except FileNotFoundError:
-                          time.sleep(1)
-                      except Exception as e:
-                          print(f"メッセージ監視エラー: {e}", flush=True)
-                      
-                      time.sleep(1)
 
               def start_chat(self, initial_message=None):
                   """チャットセッションの開始"""
@@ -99,11 +72,6 @@ jobs:
                   # 初期メッセージがある場合は送信
                   if initial_message:
                       self.send_message(initial_message)
-
-                  # メッセージ監視スレッド
-                  reader_thread = threading.Thread(target=self.continuous_message_reader)
-                  reader_thread.daemon = True
-                  reader_thread.start()
 
                   # 6時間の制限
                   start_time = time.time()
@@ -145,16 +113,18 @@ jobs:
               main()
           EOL
 
+      - name: Commit and Push README
+        run: |
+          git config user.name 'GitHub Actions'
+          git config user.email 'actions@github.com'
+          
+          git add README.md
+          git commit -m "Update README with new chat message" || echo "No changes to commit"
+          git push
+
       - name: Run 救っちょ@BBS
         env:
           USERNAME: ${{ github.event.inputs.username }}
           INITIAL_MESSAGE: ${{ github.event.inputs.message }}
         run: |
           python 救っちょ_bbs_chat.py
-
-      - name: Upload Chat Log
-        if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: 救っちょ_bbs_log
-          path: 救っちょ_bbs_messages.txt
