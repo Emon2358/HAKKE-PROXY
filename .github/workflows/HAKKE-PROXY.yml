@@ -1,0 +1,155 @@
+name: HAKKE PROXY
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Target URL to proxy'
+        required: true
+        default: 'https://example.com'
+
+jobs:
+  deploy-proxy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Generate Dynamic Nginx Configuration
+      env:
+        TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+      run: |
+        # Nginx設定ディレクトリ作成
+        mkdir -p nginx/conf.d
+        
+        # メインNginx設定
+        cat > nginx/nginx.conf << EOL
+        user  nginx;
+        worker_processes  auto;
+        
+        error_log  /var/log/nginx/error.log warn;
+        pid        /var/run/nginx.pid;
+        
+        events {
+            worker_connections  1024;
+        }
+        
+        http {
+            include       /etc/nginx/mime.types;
+            default_type  application/octet-stream;
+            
+            log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+                              '\$status \$body_bytes_sent "\$http_referer" '
+                              '"\$http_user_agent" "\$http_x_forwarded_for"';
+            
+            access_log  /var/log/nginx/access.log  main;
+            
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            
+            sendfile        on;
+            keepalive_timeout  65;
+            
+            include /etc/nginx/conf.d/*.conf;
+        }
+        EOL
+        
+        # 動的プロキシ設定
+        cat > nginx/conf.d/dynamic_proxy.conf << EOL
+        server {
+            listen 80;
+            server_name localhost;
+            
+            location / {
+                proxy_pass ${TARGET_URL};
+                proxy_intercept_errors on;
+                
+                # クロスオリジンリソース共有（CORS）の設定
+                add_header 'Access-Control-Allow-Origin' '*';
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+                
+                # エラーページの設定
+                error_page 404 = @fallback;
+                error_page 500 502 503 504 = @fallback;
+            }
+            
+            # フォールバックロケーション
+            location @fallback {
+                return 302 ${TARGET_URL};
+            }
+        }
+        EOL
+    
+    - name: Create Dockerfile
+      env:
+        TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+      run: |
+        cat > Dockerfile << EOL
+        FROM nginx:latest
+        
+        # カスタム設定をコピー
+        COPY nginx/nginx.conf /etc/nginx/nginx.conf
+        COPY nginx/conf.d/dynamic_proxy.conf /etc/nginx/conf.d/dynamic_proxy.conf
+        
+        # デバッグ用のインデックスページ
+        RUN echo "Proxying to: ${TARGET_URL}" > /usr/share/nginx/html/index.html
+        
+        EXPOSE 80
+        CMD ["nginx", "-g", "daemon off;"]
+        EOL
+    
+    - name: Build and Test Nginx Proxy
+      run: |
+        # Dockerイメージをビルド
+        docker build -t dynamic-nginx-proxy .
+        
+        # コンテナを起動
+        docker run -d -p 8080:80 --name proxy-container dynamic-nginx-proxy
+        
+        # コンテナログを表示
+        docker logs proxy-container
+        
+        # プロキシの動作を確認
+        curl http://localhost:8080
+    
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: .
+        publish_branch: gh-pages
+    
+    - name: Generate README with Proxy Info
+      env:
+        TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+      run: |
+        cat > README.md << EOL
+        # Dynamic Nginx Proxy
+
+        ## Current Proxy Configuration
+
+        - **Target URL**: ${TARGET_URL}
+        - **Proxy Endpoint**: [GitHub Pages Proxy](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/)
+
+        ### How to Use
+
+        1. Fork this repository
+        2. Go to Actions tab
+        3. Select "Dynamic Nginx Proxy Deployment"
+        4. Click "Run workflow"
+        5. Enter the target URL you want to proxy
+        EOL
+    
+    - name: Commit and Push README
+      run: |
+        git config --global user.name 'GitHub Actions'
+        git config --global user.email 'actions@github.com'
+        git add README.md
+        git commit -m "Update README with proxy info" || echo "No changes to commit"
+        git push
