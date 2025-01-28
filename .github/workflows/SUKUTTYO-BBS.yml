@@ -11,12 +11,19 @@ on:
         description: 'メッセージ (オプション)'
         required: false
 
+# 書き込み権限を追加
+permissions:
+  contents: write
+
 jobs:
   sukuttyo_bbs_chat:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
+        with:
+          # 全ての履歴を取得
+          fetch-depth: 0
       
       - name: Setup Python
         uses: actions/setup-python@v3
@@ -113,13 +120,25 @@ jobs:
               main()
           EOL
 
-      - name: Commit and Push README
+      - name: Create README if not exists
         run: |
-          git config user.name 'GitHub Actions'
-          git config user.email 'actions@github.com'
+          if [ ! -f README.md ]; then
+            echo "# SUKUTTYO@BBS チャットログ" > README.md
+          fi
+
+      - name: Commit and Push README
+        env:
+          # GitHubトークンを使用
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
           
-          git add README.md
-          git commit -m "Update README with new chat message" || echo "No changes to commit"
+          # 全てのファイルを追加
+          git add .
+          
+          # コミットとプッシュ
+          git commit -m "Update SUKUTTYO BBS chat log" || echo "No changes to commit"
           git push
 
       - name: Run SUKUTTYO BBS
