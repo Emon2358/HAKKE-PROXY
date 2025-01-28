@@ -1,8 +1,6 @@
 name: HAKKE PROXY
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
       target_url:
@@ -10,34 +8,25 @@ on:
         required: true
         default: 'https://example.com'
 
-permissions:
-  contents: write
-  packages: write
-
 jobs:
-  build-and-deploy:
+  dynamic-proxy-setup:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout Repository
         uses: actions/checkout@v3
       
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-      
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
+      - name: Setup Python
+        uses: actions/setup-python@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          python_version: '3.9'
       
-      - name: Generate Dynamic Nginx Configuration
+      - name: Generate Nginx Configuration
         env:
-          TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+          TARGET_URL: ${{ github.event.inputs.target_url }}
         run: |
           mkdir -p nginx/conf.d
           
-          # メインNginx設定
+          # Nginx主設定
           cat > nginx/nginx.conf << EOL
           user  nginx;
           worker_processes  auto;
@@ -64,13 +53,6 @@ jobs:
               proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
               proxy_set_header X-Forwarded-Proto \$scheme;
               
-              proxy_ssl_server_name on;
-              proxy_ssl_protocols TLSv1.2 TLSv1.3;
-              
-              proxy_connect_timeout 60s;
-              proxy_send_timeout 60s;
-              proxy_read_timeout 60s;
-              
               sendfile        on;
               keepalive_timeout  65;
               
@@ -78,127 +60,124 @@ jobs:
           }
           EOL
           
-          # 動的プロキシ設定
-          cat > nginx/conf.d/dynamic_proxy.conf << EOL
+          # プロキシ設定
+          cat > nginx/conf.d/proxy.conf << EOL
           server {
-              listen 80;
+              listen 8080;
               server_name localhost;
               
               location / {
                   proxy_pass ${TARGET_URL};
-                  proxy_intercept_errors on;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
                   
+                  # CORS設定
                   add_header 'Access-Control-Allow-Origin' '*';
                   add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
-                  add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
                   
-                  proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
-                  proxy_cache_lock on;
-                  
+                  # エラーハンドリング
+                  proxy_intercept_errors on;
                   error_page 404 = @fallback;
-                  error_page 500 502 503 504 = @fallback;
               }
               
               location @fallback {
                   return 302 ${TARGET_URL};
               }
-              
-              add_header X-Frame-Options SAMEORIGIN;
-              add_header X-XSS-Protection "1; mode=block";
-              add_header X-Content-Type-Options nosniff;
           }
           EOL
       
-      - name: Create Dockerfile
-        env:
-          TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+      - name: Create Python Proxy Monitoring Script
         run: |
-          cat > Dockerfile << EOL
-          FROM nginx:latest
+          cat > proxy_monitor.py << EOL
+          import requests
+          import time
+          import os
+          import logging
           
-          RUN apt-get update && \
-              apt-get upgrade -y && \
-              apt-get install -y curl ca-certificates && \
-              rm -rf /var/lib/apt/lists/*
+          logging.basicConfig(level=logging.INFO)
+          logger = logging.getLogger(__name__)
           
-          COPY nginx/nginx.conf /etc/nginx/nginx.conf
-          COPY nginx/conf.d/dynamic_proxy.conf /etc/nginx/conf.d/dynamic_proxy.conf
+          TARGET_URL = os.environ.get('TARGET_URL', 'https://example.com')
           
-          RUN echo "<!DOCTYPE html>" > /usr/share/nginx/html/index.html && \
-              echo "<html><body>" >> /usr/share/nginx/html/index.html && \
-              echo "<h1>Dynamic Proxy Server</h1>" >> /usr/share/nginx/html/index.html && \
-              echo "<p>Proxying to: ${TARGET_URL}</p>" >> /usr/share/nginx/html/index.html && \
-              echo "</body></html>" >> /usr/share/nginx/html/index.html
+          def check_proxy_status():
+              try:
+                  # プロキシ経由でターゲットにアクセス
+                  response = requests.get(
+                      f'http://localhost:8080', 
+                      timeout=10
+                  )
+                  logger.info(f"Proxy Status: {response.status_code}")
+                  return response.status_code == 200
+              except Exception as e:
+                  logger.error(f"Proxy Check Failed: {e}")
+                  return False
           
-          RUN chmod 644 /etc/nginx/nginx.conf /etc/nginx/conf.d/dynamic_proxy.conf
+          def main():
+              max_attempts = 5
+              for attempt in range(max_attempts):
+                  if check_proxy_status():
+                      logger.info("Proxy is operational")
+                      return
+                  
+                  logger.warning(f"Proxy check failed. Attempt {attempt + 1}/{max_attempts}")
+                  time.sleep(2)
+              
+              logger.error("Proxy monitoring failed after multiple attempts")
+              raise Exception("Proxy is not functioning")
           
-          RUN chown -R nginx:nginx /etc/nginx /var/cache/nginx /var/log/nginx
-          
-          EXPOSE 80
-          
-          COPY entrypoint.sh /entrypoint.sh
-          RUN chmod +x /entrypoint.sh
-          
-          ENTRYPOINT ["/entrypoint.sh"]
-          EOL
-          
-          cat > entrypoint.sh << EOL
-          #!/bin/bash
-          set -e
-          
-          nginx -t
-          
-          exec nginx -g "daemon off;"
+          if __name__ == "__main__":
+              main()
           EOL
       
-      - name: Build and Push Docker Image
+      - name: Start Nginx Proxy
         env:
-          TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+          TARGET_URL: ${{ github.event.inputs.target_url }}
         run: |
-          # イメージをビルド
-          IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/dynamic-nginx-proxy
+          # Nginxをインストール
+          sudo apt-get update
+          sudo apt-get install -y nginx
           
-          docker build -t ${IMAGE_NAME}:latest \
-                       -t ${IMAGE_NAME}:${{ github.sha }} .
+          # Nginx設定をコピー
+          sudo cp -r nginx/nginx.conf /etc/nginx/nginx.conf
+          sudo cp -r nginx/conf.d/proxy.conf /etc/nginx/conf.d/proxy.conf
           
-          # GitHub Container Registryにプッシュ
-          docker push ${IMAGE_NAME}:latest
-          docker push ${IMAGE_NAME}:${{ github.sha }}
+          # Nginxを起動
+          sudo nginx
       
-      - name: Generate README
-        env:
-          TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+      - name: Install Python Dependencies
         run: |
-          IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/dynamic-nginx-proxy
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: Monitor Proxy
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url }}
+        run: |
+          python proxy_monitor.py
+      
+      - name: Create Proxy Report
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url }}
+        run: |
+          # プロキシ情報レポートを生成
+          cat > PROXY_REPORT.md << EOL
+          # Dynamic Proxy Report
           
-          cat > README.md << EOL
-          # Dynamic Nginx Proxy
-
-          ## Current Proxy Configuration
-
+          ## Configuration
           - **Target URL**: ${TARGET_URL}
-          - **Docker Image**: [\`${IMAGE_NAME}\`](https://github.com/${{ github.repository_owner }}/packages)
-
+          - **Proxy Endpoint**: http://localhost:8080
+          
+          ## Monitoring Results
+          - Timestamp: $(date)
+          - Status: Operational
+          
           ### How to Use
-
-          1. Pull the Docker image:
-             \`\`\`
-             docker pull ${IMAGE_NAME}:latest
-             \`\`\`
-
-          2. Run the container:
-             \`\`\`
-             docker run -d -p 8080:80 ${IMAGE_NAME}:latest
-             \`\`\`
-
-          3. Access the proxy at \`http://localhost:8080\`
+          1. Access the proxied site via the GitHub Actions environment
+          2. Use the proxy endpoint for further testing
           EOL
       
-      - name: Commit and Push README
-        run: |
-          git config user.name 'GitHub Actions'
-          git config user.email 'actions@github.com'
-          
-          git add README.md
-          git commit -m "Update README with proxy configuration" || echo "No changes to commit"
-          git push
+      - name: Upload Proxy Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: proxy-report
+          path: PROXY_REPORT.md
