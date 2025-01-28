@@ -18,21 +18,22 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v3
         with:
-          python_version: '3.9'
+          python-version: '3.9'
       
-      - name: Generate Nginx Configuration
+      - name: Prepare Nginx Configuration
         env:
           TARGET_URL: ${{ github.event.inputs.target_url }}
         run: |
+          # Nginx設定ディレクトリ作成
           mkdir -p nginx/conf.d
           
           # Nginx主設定
-          cat > nginx/nginx.conf << EOL
+          cat > nginx/nginx.conf << 'EOL'
           user  nginx;
           worker_processes  auto;
           
-          error_log  /var/log/nginx/error.log warn;
-          pid        /var/run/nginx.pid;
+          error_log  /tmp/nginx-error.log warn;
+          pid        /tmp/nginx.pid;
           
           events {
               worker_connections  1024;
@@ -42,124 +43,150 @@ jobs:
               include       /etc/nginx/mime.types;
               default_type  application/octet-stream;
               
-              log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
-                                '\$status \$body_bytes_sent "\$http_referer" '
-                                '"\$http_user_agent" "\$http_x_forwarded_for"';
+              log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                                '$status $body_bytes_sent "$http_referer" '
+                                '"$http_user_agent" "$http_x_forwarded_for"';
               
-              access_log  /var/log/nginx/access.log  main;
+              access_log  /tmp/nginx-access.log  main;
               
-              proxy_set_header Host \$host;
-              proxy_set_header X-Real-IP \$remote_addr;
-              proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto \$scheme;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
               
               sendfile        on;
               keepalive_timeout  65;
               
-              include /etc/nginx/conf.d/*.conf;
-          }
-          EOL
-          
-          # プロキシ設定
-          cat > nginx/conf.d/proxy.conf << EOL
-          server {
-              listen 8080;
-              server_name localhost;
-              
-              location / {
-                  proxy_pass ${TARGET_URL};
-                  proxy_set_header Host \$host;
-                  proxy_set_header X-Real-IP \$remote_addr;
+              server {
+                  listen 8080;
+                  server_name localhost;
                   
-                  # CORS設定
-                  add_header 'Access-Control-Allow-Origin' '*';
-                  add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+                  location / {
+                      proxy_pass $TARGET_URL;
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      
+                      # CORS設定
+                      add_header 'Access-Control-Allow-Origin' '*';
+                      add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+                      
+                      # エラーハンドリング
+                      proxy_intercept_errors on;
+                      error_page 404 = @fallback;
+                  }
                   
-                  # エラーハンドリング
-                  proxy_intercept_errors on;
-                  error_page 404 = @fallback;
-              }
-              
-              location @fallback {
-                  return 302 ${TARGET_URL};
+                  location @fallback {
+                      return 302 $TARGET_URL;
+                  }
               }
           }
           EOL
       
-      - name: Create Python Proxy Monitoring Script
+      - name: Create Proxy Monitoring Script
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url }}
         run: |
-          cat > proxy_monitor.py << EOL
-          import requests
+          cat > proxy_monitor.py << 'EOL'
+          import subprocess
+          import sys
           import time
-          import os
+          import requests
           import logging
+          import os
           
-          logging.basicConfig(level=logging.INFO)
+          logging.basicConfig(level=logging.INFO, 
+                             format='%(asctime)s - %(levelname)s - %(message)s')
           logger = logging.getLogger(__name__)
           
-          TARGET_URL = os.environ.get('TARGET_URL', 'https://example.com')
+          def start_nginx():
+              """Nginxプロセスを起動"""
+              try:
+                  # Nginx設定ファイルの検証
+                  subprocess.run(['nginx', '-t'], check=True)
+                  
+                  # Nginxを起動
+                  nginx_process = subprocess.Popen(['nginx'], 
+                                                   stdout=subprocess.PIPE, 
+                                                   stderr=subprocess.PIPE)
+                  return nginx_process
+              except subprocess.CalledProcessError as e:
+                  logger.error(f"Nginx設定エラー: {e}")
+                  sys.exit(1)
+              except Exception as e:
+                  logger.error(f"Nginx起動エラー: {e}")
+                  sys.exit(1)
           
-          def check_proxy_status():
+          def check_proxy_status(target_url):
+              """プロキシの動作確認"""
               try:
                   # プロキシ経由でターゲットにアクセス
                   response = requests.get(
-                      f'http://localhost:8080', 
+                      'http://localhost:8080', 
                       timeout=10
                   )
                   logger.info(f"Proxy Status: {response.status_code}")
-                  return response.status_code == 200
-              except Exception as e:
-                  logger.error(f"Proxy Check Failed: {e}")
+                  
+                  # レスポンスの基本的な検証
+                  if response.status_code == 200:
+                      logger.info("プロキシは正常に動作しています")
+                      return True
+                  else:
+                      logger.warning(f"プロキシのレスポンスが異常です: {response.status_code}")
+                      return False
+              
+              except requests.RequestException as e:
+                  logger.error(f"プロキシアクセスエラー: {e}")
                   return False
           
           def main():
+              target_url = os.environ.get('TARGET_URL', 'https://example.com')
+              
+              # Nginx起動
+              nginx_process = start_nginx()
+              
+              # プロキシ動作確認
               max_attempts = 5
               for attempt in range(max_attempts):
-                  if check_proxy_status():
-                      logger.info("Proxy is operational")
-                      return
+                  if check_proxy_status(target_url):
+                      break
                   
-                  logger.warning(f"Proxy check failed. Attempt {attempt + 1}/{max_attempts}")
+                  logger.warning(f"プロキシ確認失敗. 再試行 {attempt + 1}/{max_attempts}")
                   time.sleep(2)
               
-              logger.error("Proxy monitoring failed after multiple attempts")
-              raise Exception("Proxy is not functioning")
+              # プロセスの状態を維持
+              try:
+                  nginx_process.wait()
+              except KeyboardInterrupt:
+                  logger.info("プロセス終了")
+                  nginx_process.terminate()
           
           if __name__ == "__main__":
               main()
           EOL
       
-      - name: Start Nginx Proxy
-        env:
-          TARGET_URL: ${{ github.event.inputs.target_url }}
-        run: |
-          # Nginxをインストール
-          sudo apt-get update
-          sudo apt-get install -y nginx
-          
-          # Nginx設定をコピー
-          sudo cp -r nginx/nginx.conf /etc/nginx/nginx.conf
-          sudo cp -r nginx/conf.d/proxy.conf /etc/nginx/conf.d/proxy.conf
-          
-          # Nginxを起動
-          sudo nginx
-      
-      - name: Install Python Dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Monitor Proxy
+      - name: Run Proxy Monitor
         env:
           TARGET_URL: ${{ github.event.inputs.target_url }}
         run: |
-          python proxy_monitor.py
+          # 一時的なログディレクトリ作成
+          mkdir -p /tmp/nginx-logs
+          
+          # プロキシモニタースクリプト実行
+          python proxy_monitor.py &
+          
+          # バックグラウンドプロセスの生存を確認
+          sleep 30
       
-      - name: Create Proxy Report
+      - name: Generate Proxy Report
         env:
           TARGET_URL: ${{ github.event.inputs.target_url }}
         run: |
-          # プロキシ情報レポートを生成
+          # プロキシ情報レポート生成
           cat > PROXY_REPORT.md << EOL
           # Dynamic Proxy Report
           
@@ -171,6 +198,11 @@ jobs:
           - Timestamp: $(date)
           - Status: Operational
           
+          ### Nginx Logs
+          \`\`\`
+          $(cat /tmp/nginx-error.log || echo "No error logs")
+          \`\`\`
+          
           ### How to Use
           1. Access the proxied site via the GitHub Actions environment
           2. Use the proxy endpoint for further testing
@@ -181,3 +213,12 @@ jobs:
         with:
           name: proxy-report
           path: PROXY_REPORT.md
+      
+      - name: Show Nginx Logs
+        if: always()
+        run: |
+          echo "=== Nginx Error Log ==="
+          cat /tmp/nginx-error.log || true
+          
+          echo "=== Nginx Access Log ==="
+          cat /tmp/nginx-access.log || true
