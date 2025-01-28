@@ -10,195 +10,226 @@ on:
         required: true
         default: 'https://example.com'
 
+# デフォルトの権限を設定
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
 jobs:
-  deploy-proxy:
+  # ビルドジョブ
+  build:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-    
-    - name: Generate Dynamic Nginx Configuration
-      env:
-        TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
-      run: |
-        mkdir -p nginx/conf.d
-        
-        cat > nginx/nginx.conf << EOL
-        user  nginx;
-        worker_processes  auto;
-        
-        error_log  /var/log/nginx/error.log warn;
-        pid        /var/run/nginx.pid;
-        
-        events {
-            worker_connections  1024;
-        }
-        
-        http {
-            include       /etc/nginx/mime.types;
-            default_type  application/octet-stream;
-            
-            log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
-                              '\$status \$body_bytes_sent "\$http_referer" '
-                              '"\$http_user_agent" "\$http_x_forwarded_for"';
-            
-            access_log  /var/log/nginx/access.log  main;
-            
-            proxy_set_header Host \$host;
-            proxy_set_header X-Real-IP \$remote_addr;
-            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto \$scheme;
-            
-            proxy_ssl_server_name on;
-            proxy_ssl_protocols TLSv1.2 TLSv1.3;
-            
-            proxy_connect_timeout 60s;
-            proxy_send_timeout 60s;
-            proxy_read_timeout 60s;
-            
-            sendfile        on;
-            keepalive_timeout  65;
-            
-            include /etc/nginx/conf.d/*.conf;
-        }
-        EOL
-        
-        cat > nginx/conf.d/dynamic_proxy.conf << EOL
-        server {
-            listen 80;
-            server_name localhost;
-            
-            location / {
-                proxy_pass ${TARGET_URL};
-                proxy_intercept_errors on;
-                
-                add_header 'Access-Control-Allow-Origin' '*';
-                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
-                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
-                
-                proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
-                proxy_cache_lock on;
-                
-                error_page 404 = @fallback;
-                error_page 500 502 503 504 = @fallback;
-            }
-            
-            location @fallback {
-                return 302 ${TARGET_URL};
-            }
-            
-            add_header X-Frame-Options SAMEORIGIN;
-            add_header X-XSS-Protection "1; mode=block";
-            add_header X-Content-Type-Options nosniff;
-        }
-        EOL
-    
-    - name: Create Dockerfile
-      env:
-        TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
-      run: |
-        cat > Dockerfile << EOL
-        FROM nginx:latest
-        
-        RUN apt-get update && \
-            apt-get upgrade -y && \
-            apt-get install -y curl ca-certificates && \
-            rm -rf /var/lib/apt/lists/*
-        
-        COPY nginx/nginx.conf /etc/nginx/nginx.conf
-        COPY nginx/conf.d/dynamic_proxy.conf /etc/nginx/conf.d/dynamic_proxy.conf
-        
-        RUN echo "<!DOCTYPE html>" > /usr/share/nginx/html/index.html && \
-            echo "<html><body>" >> /usr/share/nginx/html/index.html && \
-            echo "<h1>Dynamic Proxy Server</h1>" >> /usr/share/nginx/html/index.html && \
-            echo "<p>Proxying to: ${TARGET_URL}</p>" >> /usr/share/nginx/html/index.html && \
-            echo "</body></html>" >> /usr/share/nginx/html/index.html
-        
-        RUN chmod 644 /etc/nginx/nginx.conf /etc/nginx/conf.d/dynamic_proxy.conf
-        
-        RUN chown -R nginx:nginx /etc/nginx /var/cache/nginx /var/log/nginx
-        
-        EXPOSE 80
-        
-        COPY entrypoint.sh /entrypoint.sh
-        RUN chmod +x /entrypoint.sh
-        
-        ENTRYPOINT ["/entrypoint.sh"]
-        EOL
-        
-        cat > entrypoint.sh << EOL
-        #!/bin/bash
-        set -e
-        
-        nginx -t
-        
-        exec nginx -g "daemon off;"
-        EOL
-    
-    - name: Build and Test Nginx Proxy
-      run: |
-        docker build -t dynamic-nginx-proxy .
-        
-        docker run -d -p 8080:80 --name proxy-container dynamic-nginx-proxy
-        
-        docker logs proxy-container
-        
-        curl http://localhost:8080
-    
-    - name: Setup Pages
-      uses: actions/configure-pages@v3
-    
-    - name: Build with Jekyll
-      uses: actions/jekyll-build-pages@v1
-      with:
-        source: ./
-        destination: ./_site
-    
-    - name: Upload artifact
-      uses: actions/upload-pages-artifact@v2
-      with:
-        path: ./_site
-    
-    - name: Deploy to GitHub Pages
-      id: deployment
-      uses: actions/deploy-pages@v2
-    
-    - name: Generate README with Proxy Info
-      env:
-        TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
-      run: |
-        cat > README.md << EOL
-        # Dynamic Nginx Proxy
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Generate Dynamic Nginx Configuration
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+        run: |
+          mkdir -p nginx/conf.d
+          
+          # メインNginx設定
+          cat > nginx/nginx.conf << EOL
+          user  nginx;
+          worker_processes  auto;
+          
+          error_log  /var/log/nginx/error.log warn;
+          pid        /var/run/nginx.pid;
+          
+          events {
+              worker_connections  1024;
+          }
+          
+          http {
+              include       /etc/nginx/mime.types;
+              default_type  application/octet-stream;
+              
+              log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+                                '\$status \$body_bytes_sent "\$http_referer" '
+                                '"\$http_user_agent" "\$http_x_forwarded_for"';
+              
+              access_log  /var/log/nginx/access.log  main;
+              
+              proxy_set_header Host \$host;
+              proxy_set_header X-Real-IP \$remote_addr;
+              proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto \$scheme;
+              
+              proxy_ssl_server_name on;
+              proxy_ssl_protocols TLSv1.2 TLSv1.3;
+              
+              proxy_connect_timeout 60s;
+              proxy_send_timeout 60s;
+              proxy_read_timeout 60s;
+              
+              sendfile        on;
+              keepalive_timeout  65;
+              
+              include /etc/nginx/conf.d/*.conf;
+          }
+          EOL
+          
+          # 動的プロキシ設定
+          cat > nginx/conf.d/dynamic_proxy.conf << EOL
+          server {
+              listen 80;
+              server_name localhost;
+              
+              location / {
+                  proxy_pass ${TARGET_URL};
+                  proxy_intercept_errors on;
+                  
+                  add_header 'Access-Control-Allow-Origin' '*';
+                  add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+                  add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+                  
+                  proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
+                  proxy_cache_lock on;
+                  
+                  error_page 404 = @fallback;
+                  error_page 500 502 503 504 = @fallback;
+              }
+              
+              location @fallback {
+                  return 302 ${TARGET_URL};
+              }
+              
+              add_header X-Frame-Options SAMEORIGIN;
+              add_header X-XSS-Protection "1; mode=block";
+              add_header X-Content-Type-Options nosniff;
+          }
+          EOL
+      
+      - name: Create Dockerfile
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+        run: |
+          cat > Dockerfile << EOL
+          FROM nginx:latest
+          
+          RUN apt-get update && \
+              apt-get upgrade -y && \
+              apt-get install -y curl ca-certificates && \
+              rm -rf /var/lib/apt/lists/*
+          
+          COPY nginx/nginx.conf /etc/nginx/nginx.conf
+          COPY nginx/conf.d/dynamic_proxy.conf /etc/nginx/conf.d/dynamic_proxy.conf
+          
+          RUN echo "<!DOCTYPE html>" > /usr/share/nginx/html/index.html && \
+              echo "<html><body>" >> /usr/share/nginx/html/index.html && \
+              echo "<h1>Dynamic Proxy Server</h1>" >> /usr/share/nginx/html/index.html && \
+              echo "<p>Proxying to: ${TARGET_URL}</p>" >> /usr/share/nginx/html/index.html && \
+              echo "</body></html>" >> /usr/share/nginx/html/index.html
+          
+          RUN chmod 644 /etc/nginx/nginx.conf /etc/nginx/conf.d/dynamic_proxy.conf
+          
+          RUN chown -R nginx:nginx /etc/nginx /var/cache/nginx /var/log/nginx
+          
+          EXPOSE 80
+          
+          COPY entrypoint.sh /entrypoint.sh
+          RUN chmod +x /entrypoint.sh
+          
+          ENTRYPOINT ["/entrypoint.sh"]
+          EOL
+          
+          cat > entrypoint.sh << EOL
+          #!/bin/bash
+          set -e
+          
+          nginx -t
+          
+          exec nginx -g "daemon off;"
+          EOL
+      
+      - name: Build and Test Nginx Proxy
+        run: |
+          docker build -t dynamic-nginx-proxy .
+          docker run -d -p 8080:80 --name proxy-container dynamic-nginx-proxy
+          docker logs proxy-container
+          curl http://localhost:8080
+      
+      - name: Prepare Pages
+        run: |
+          # GitHub Pagesに必要な静的ファイルを準備
+          mkdir -p _site
+          
+          # index.htmlを作成
+          cat > _site/index.html << EOL
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Dynamic Nginx Proxy</title>
+          </head>
+          <body>
+              <h1>Dynamic Nginx Proxy</h1>
+              <p>Proxy Target: ${{ github.event.inputs.target_url || 'https://example.com' }}</p>
+          </body>
+          </html>
+          EOL
+          
+          # 追加のファイルをコピー
+          cp -r nginx _site/
+          cp Dockerfile _site/
+      
+      - name: Generate README
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+        run: |
+          cat > _site/README.md << EOL
+          # Dynamic Nginx Proxy
 
-        ## Current Proxy Configuration
+          ## Current Proxy Configuration
 
-        - **Target URL**: ${TARGET_URL}
-        - **Proxy Endpoint**: [GitHub Pages Proxy](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/)
+          - **Target URL**: ${TARGET_URL}
+          - **Proxy Endpoint**: [GitHub Pages Proxy](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/)
 
-        ### How to Use
+          ### How to Use
 
-        1. Fork this repository
-        2. Go to Actions tab
-        3. Select "Dynamic Nginx Proxy Deployment"
-        4. Click "Run workflow"
-        5. Enter the target URL you want to proxy
-        EOL
-    
-    - name: Commit and Push README
-      run: |
-        git config --global user.name 'GitHub Actions'
-        git config --global user.email 'actions@github.com'
-        
-        git add README.md
-        git commit -m "Update README with proxy info" || echo "No changes to commit"
-        
-        # Use GitHub token for authentication
-        git push origin main
+          1. Fork this repository
+          2. Go to Actions tab
+          3. Select "Dynamic Nginx Proxy Deployment"
+          4. Click "Run workflow"
+          5. Enter the target URL you want to proxy
+          EOL
+      
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v2
+        with:
+          path: _site/
+
+  # デプロイジョブ
+  deploy:
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v2
+  
+  # README更新ジョブ ```yaml
+  update-readme:
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Commit and Push README
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          
+          git add _site/README.md
+          git commit -m "Update README with proxy info" || echo "No changes to commit"
+          
+          # Use GitHub token for authentication
+          git push origin main ``` yaml ```
