@@ -1,4 +1,4 @@
-name: HAKKE PROXY
+name:HAKKE PROXY
 
 on:
   push:
@@ -52,6 +52,15 @@ jobs:
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
             
+            # SSL/セキュリティ設定
+            proxy_ssl_server_name on;
+            proxy_ssl_protocols TLSv1.2 TLSv1.3;
+            
+            # タイムアウト設定
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+            
             sendfile        on;
             keepalive_timeout  65;
             
@@ -62,7 +71,7 @@ jobs:
         # 動的プロキシ設定
         cat > nginx/conf.d/dynamic_proxy.conf << EOL
         server {
-            listen 80;
+            listen 0.0.0.0:80;
             server_name localhost;
             
             location / {
@@ -74,6 +83,10 @@ jobs:
                 add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
                 add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
                 
+                # キャッシュ制御
+                proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
+                proxy_cache_lock on;
+                
                 # エラーページの設定
                 error_page 404 = @fallback;
                 error_page 500 502 503 504 = @fallback;
@@ -83,6 +96,11 @@ jobs:
             location @fallback {
                 return 302 ${TARGET_URL};
             }
+            
+            # セキュリティヘッダー
+            add_header X-Frame-Options SAMEORIGIN;
+            add_header X-XSS-Protection "1; mode=block";
+            add_header X-Content-Type-Options nosniff;
         }
         EOL
     
@@ -93,15 +111,48 @@ jobs:
         cat > Dockerfile << EOL
         FROM nginx:latest
         
+        # システム更新とセキュリティ強化
+        RUN apt-get update && \
+            apt-get upgrade -y && \
+            apt-get install -y curl ca-certificates && \
+            rm -rf /var/lib/apt/lists/*
+        
         # カスタム設定をコピー
         COPY nginx/nginx.conf /etc/nginx/nginx.conf
         COPY nginx/conf.d/dynamic_proxy.conf /etc/nginx/conf.d/dynamic_proxy.conf
         
         # デバッグ用のインデックスページ
-        RUN echo "Proxying to: ${TARGET_URL}" > /usr/share/nginx/html/index.html
+        RUN echo "<!DOCTYPE html>" > /usr/share/nginx/html/index.html && \
+            echo "<html><body>" >> /usr/share/nginx/html/index.html && \
+            echo "<h1>Dynamic Proxy Server</h1>" >> /usr/share/nginx/html/index.html && \
+            echo "<p>Proxying to: ${TARGET_URL}</p>" >> /usr/share/nginx/html/index.html && \
+            echo "</body></html>" >> /usr/share/nginx/html/index.html
+        
+        # Nginx設定の権限を修正
+        RUN chmod 644 /etc/nginx/nginx.conf /etc/nginx/conf.d/dynamic_proxy.conf
+        
+        # ユーザーを変更してセキュリティを強化
+        RUN chown -R nginx:nginx /etc/nginx /var/cache/nginx /var/log/nginx
         
         EXPOSE 80
-        CMD ["nginx", "-g", "daemon off;"]
+        
+        # エントリーポイントスクリプトを追加
+        COPY entrypoint.sh /entrypoint.sh
+        RUN chmod +x /entrypoint.sh
+        
+        ENTRYPOINT ["/entrypoint.sh"]
+        EOL
+        
+        # エントリーポイントスクリプトを作成
+        cat > entrypoint.sh << EOL
+        #!/bin/bash
+        set -e
+        
+        # Nginx設定の最終チェック
+        nginx -t
+        
+        # Nginxをフォアグラウンドで起動
+        exec nginx -g "daemon off;"
         EOL
     
     - name: Build and Test Nginx Proxy
@@ -109,14 +160,44 @@ jobs:
         # Dockerイメージをビルド
         docker build -t dynamic-nginx-proxy .
         
-        # コンテナを起動
-        docker run -d -p 8080:80 --name proxy-container dynamic-nginx-proxy
+        # コンテナを起動（ネットワークモードをホストに変更）
+        docker run -d --network host --name proxy-container dynamic-nginx-proxy
+        
+        # 起動を待つ
+        sleep 10
         
         # コンテナログを表示
         docker logs proxy-container
         
-        # プロキシの動作を確認
-        curl http://localhost:8080
+        # プロキシの動作を確認（高度な接続チェック）
+        max_attempts=5
+        attempt=0
+        
+        while [ $attempt -lt $max_attempts ]; do
+          # より詳細な接続テスト
+          response=$(curl -v -L -m 15 \
+            -H "User-Agent: GitHub-Actions-Proxy-Check" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml" \
+            http://localhost || true)
+          
+          if [ $? -eq 0 ]; then
+            echo "Successful connection to proxy"
+            # レスポンスの最初の10行を表示
+            echo "$response" | head -n 10
+            break
+          fi
+          
+          echo "Attempt $((attempt+1)) failed. Retrying..."
+          attempt=$((attempt+1))
+          sleep 5
+        done
+        
+        if [ $attempt -eq $max_attempts ]; then
+          echo "Failed to connect to proxy after $max_attempts attempts"
+          docker ps
+          docker logs proxy-container
+          exit 1
+        fi
     
     - name: Deploy to GitHub Pages
       uses: peaceiris/actions-gh-pages@v3
@@ -124,32 +205,3 @@ jobs:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: .
         publish_branch: gh-pages
-    
-    - name: Generate README with Proxy Info
-      env:
-        TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
-      run: |
-        cat > README.md << EOL
-        # Dynamic Nginx Proxy
-
-        ## Current Proxy Configuration
-
-        - **Target URL**: ${TARGET_URL}
-        - **Proxy Endpoint**: [GitHub Pages Proxy](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/)
-
-        ### How to Use
-
-        1. Fork this repository
-        2. Go to Actions tab
-        3. Select "Dynamic Nginx Proxy Deployment"
-        4. Click "Run workflow"
-        5. Enter the target URL you want to proxy
-        EOL
-    
-    - name: Commit and Push README
-      run: |
-        git config --global user.name 'GitHub Actions'
-        git config --global user.email 'actions@github.com'
-        git add README.md
-        git commit -m "Update README with proxy info" || echo "No changes to commit"
-        git push
