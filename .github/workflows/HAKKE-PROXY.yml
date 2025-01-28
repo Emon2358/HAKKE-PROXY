@@ -1,4 +1,4 @@
-name:HAKKE PROXY
+name: Dynamic Nginx Proxy Deployment
 
 on:
   push:
@@ -71,7 +71,7 @@ jobs:
         # 動的プロキシ設定
         cat > nginx/conf.d/dynamic_proxy.conf << EOL
         server {
-            listen 0.0.0.0:80;
+            listen 80;
             server_name localhost;
             
             location / {
@@ -160,44 +160,14 @@ jobs:
         # Dockerイメージをビルド
         docker build -t dynamic-nginx-proxy .
         
-        # コンテナを起動（ネットワークモードをホストに変更）
-        docker run -d --network host --name proxy-container dynamic-nginx-proxy
-        
-        # 起動を待つ
-        sleep 10
+        # コンテナを起動
+        docker run -d -p 8080:80 --name proxy-container dynamic-nginx-proxy
         
         # コンテナログを表示
         docker logs proxy-container
         
-        # プロキシの動作を確認（高度な接続チェック）
-        max_attempts=5
-        attempt=0
-        
-        while [ $attempt -lt $max_attempts ]; do
-          # より詳細な接続テスト
-          response=$(curl -v -L -m 15 \
-            -H "User-Agent: GitHub-Actions-Proxy-Check" \
-            -H "Accept: text/html,application/xhtml+xml,application/xml" \
-            http://localhost || true)
-          
-          if [ $? -eq 0 ]; then
-            echo "Successful connection to proxy"
-            # レスポンスの最初の10行を表示
-            echo "$response" | head -n 10
-            break
-          fi
-          
-          echo "Attempt $((attempt+1)) failed. Retrying..."
-          attempt=$((attempt+1))
-          sleep 5
-        done
-        
-        if [ $attempt -eq $max_attempts ]; then
-          echo "Failed to connect to proxy after $max_attempts attempts"
-          docker ps
-          docker logs proxy-container
-          exit 1
-        fi
+        # プロキシの動作を確認
+        curl http://localhost:8080
     
     - name: Deploy to GitHub Pages
       uses: peaceiris/actions-gh-pages@v3
@@ -205,3 +175,32 @@ jobs:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: .
         publish_branch: gh-pages
+    
+    - name: Generate README with Proxy Info
+      env:
+        TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com' }}
+      run: |
+        cat > README.md << EOL
+        # Dynamic Nginx Proxy
+
+        ## Current Proxy Configuration
+
+        - **Target URL**: ${TARGET_URL}
+        - **Proxy Endpoint**: [GitHub Pages Proxy](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/)
+
+        ### How to Use
+
+        1. Fork this repository
+        2. Go to Actions tab
+        3. Select "Dynamic Nginx Proxy Deployment"
+        4. Click "Run workflow"
+        5. Enter the target URL you want to proxy
+        EOL
+    
+    - name: Commit and Push README
+      run: |
+        git config --global user.name 'GitHub Actions'
+        git config --global user.email 'actions@github.com'
+        git add README.md
+        git commit -m "Update README with proxy info" || echo "No changes to commit"
+        git push ```yaml```
